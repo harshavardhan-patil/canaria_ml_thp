@@ -91,3 +91,7 @@ def standardize_title(text):
     # To handle cases like Data Science Intern - Graduate vs Graduate Data Science Intern
     sorted_title = ' '.join(sorted(text.replace(',', '').split()))
     return sorted_title
+
+def get_batches(lst, batch_size):
+    for i in range(0, len(lst), batch_size):
+        yield lst[i:i + batch_size]

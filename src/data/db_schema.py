@@ -86,6 +86,14 @@ def setup_db_schema():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS title_embeddings (
+        lid VARCHAR(255) PRIMARY KEY REFERENCES jobs(lid),
+        embedding vector(384),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
     
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS job_duplicates (
@@ -99,6 +107,9 @@ def setup_db_schema():
 
     # Create indices
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_lid ON jobs(lid)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_job_embeddings_lid ON job_embeddings(lid)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_title_embeddings_lid ON title_embeddings(lid)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_processed_location ON jobs_processed(finalcity, finalstate, finalzipcode)")
 
     conn.commit()
     conn.close()

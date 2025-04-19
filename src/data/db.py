@@ -5,8 +5,10 @@ from pgvector.psycopg2 import register_vector
 from src.config import DATA_DIR
 from psycopg2.extras import execute_values
 from dotenv import load_dotenv
+from typing import List, Tuple
 import pandas as pd
 import ast
+import psycopg2.pool
 
 load_dotenv()
 
@@ -16,6 +18,37 @@ port = os.getenv("POSTGRES_PORT")
 dbname = os.getenv("POSTGRES_DB")
 user = os.getenv("POSTGRES_USER")
 password = os.getenv("POSTGRES_PASSWORD")
+
+# Create a connection pool
+min_conn = 5
+max_conn = 20
+connection_pool = None
+try:
+    connection_pool = psycopg2.pool.SimpleConnectionPool(
+        min_conn, max_conn,
+        host=host,
+        port=port,
+        dbname=dbname,
+        user=user,
+        password=password
+    )
+except:
+    pass
+finally:
+    connection_pool = psycopg2.pool.SimpleConnectionPool(
+        min_conn, max_conn,
+        host="localhost",
+        port=port,
+        dbname=dbname,
+        user=user,
+        password=password
+    )
+
+def get_connection():
+    return connection_pool.getconn()
+
+def release_connection(conn):
+    connection_pool.putconn(conn)
 
 def connect_to_db():
     """Establish connection to PostgreSQL database."""
@@ -125,6 +158,40 @@ def insert_clean_job_batch(cursor, processed_data):
     except Exception as e:
         print(f"Error inserting batch data in processed table: {e}")
         return False
+
+def get_jobs() -> List[Tuple[str, str, str]]:
+    """
+    Get a batch of jobs from the database
+    
+    Returns: List of tuples containing (lid, job_title, job_description)
+    """
+    conn = None
+    try:
+        conn = connect_to_db()
+        cursor = conn.cursor()
+        
+        query = """
+            SELECT 
+                lid, 
+                jobtitle, 
+                companyname,
+                finalcity,
+                finalstate,
+                finalzipcode,
+                jobdesc_clean
+            FROM jobs_processed
+        """
+        
+        cursor.execute(query)
+        return cursor.fetchall()
+    except Exception as e:
+        print(f"Error getting jobs batch: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
 
 def process_list_column(value):
     """Convert string representation of a list to an actual list."""

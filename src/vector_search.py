@@ -10,6 +10,7 @@ import logging
 from sentence_transformers import SentenceTransformer
 from src.data.db_schema import setup_db_schema
 from src.data.db import connect_to_db
+from src.data.db import get_connection, release_connection
 
 
 class VectorSearch:
@@ -33,31 +34,18 @@ class VectorSearch:
         """
         conn = None
         try:
-            conn = connect_to_db()
+            conn = get_connection()
             cursor = conn.cursor()
             execute_values(
             cursor,
             """INSERT INTO job_embeddings 
             (lid, embedding) VALUES %s 
             ON CONFLICT (lid) DO UPDATE SET embedding = EXCLUDED.embedding""",
-            [(lid, embedding) for lid, embedding in job_embeddings],
+            [(lid, embedding.tolist()) for lid, embedding in job_embeddings],
             template="(%s, %s::vector)"
             )
 
             cursor.execute("SELECT COUNT(*) FROM job_embeddings")
-            row_count = cursor.fetchone()[0]
-            # Check if index exists
-            cursor.execute("""
-                SELECT 1 FROM pg_indexes 
-                WHERE indexname = 'job_embeddings_idx'
-            """)
-            index_exists = cursor.fetchone() is not None
-            
-            # Create index if we have enough data and no index yet
-            if row_count > 50000 and not index_exists:
-                print(f"Data threshold reached ({row_count} rows). Creating IVFFLAT index...")
-                self.create_index()
-
             conn.commit()
             print(f"Added {len(job_embeddings)} job embeddings to database.")
 
@@ -69,7 +57,7 @@ class VectorSearch:
             raise
         finally:
             if conn:
-                conn.close()
+                release_connection(conn)
 
     def remove_batch(self, lids: List[str]) -> bool:
         """
@@ -77,7 +65,7 @@ class VectorSearch:
         """
         conn = None
         try:
-            conn = connect_to_db()
+            conn = get_connection()
             cursor = conn.cursor()
             
             # Delete embeddings in batch
@@ -102,7 +90,7 @@ class VectorSearch:
             raise
         finally:
             if conn:
-                conn.close()
+                release_connection(conn)
 
     def create_index(self,):
         """
@@ -111,7 +99,7 @@ class VectorSearch:
         """
         conn = None
         try:
-            conn = connect_to_db()
+            conn = get_connection()
             cursor = conn.cursor()
             cursor.execute("""
             CREATE INDEX IF NOT EXISTS job_embeddings_idx ON job_embeddings 
@@ -127,15 +115,15 @@ class VectorSearch:
             raise
         finally:
             if conn:
-                conn.close()
+                release_connection(conn)
 
-    def search(self, query_embedding: np.ndarray, k: int = 10, threshold: float = 0.7) -> List[Dict]:
+    def search(self, query_embedding: np.ndarray, k: int = 10, threshold: float = 0.8) -> List[Dict]:
         """
         Search for similar job embeddings.
         """
         conn = None
         try:
-            conn = connect_to_db()
+            conn = get_connection()
             cursor = conn.cursor()
             
             # Search for similar embeddings using L2 distance
@@ -158,7 +146,7 @@ class VectorSearch:
             raise
         finally:
             if conn:
-                conn.close()
+                release_connection(conn)
 
     def store_duplicates(self, duplicates: List[Tuple[str, str, float]]):
         """
@@ -166,7 +154,7 @@ class VectorSearch:
         """
         conn = None
         try:
-            conn = self._get_db_connection()
+            conn = get_connection()
             cursor = conn.cursor()
             
             # Insert duplicates in batch
@@ -185,7 +173,7 @@ class VectorSearch:
             
             count = len(duplicates)
             conn.commit()
-            print(f"Stored {count} duplicate job pairs in database.")
+            #print(f"Stored {count} duplicate job pairs in database.")
             return count
             
         except Exception as e:
@@ -195,15 +183,15 @@ class VectorSearch:
             raise
         finally:
             if conn:
-                conn.close()
+                release_connection(conn)
 
     def find_duplicates_by_exact_match(self, lids: list[str]):
         """
-        Find duplicate jobs by exact match of title, company and location.
+        Find duplicate jobs by exact match of title, company and location
         """
         conn = None
         try:
-            conn = connect_to_db()
+            conn = get_connection()
             cursor = conn.cursor()
             
             lids = list(lids)
@@ -225,7 +213,7 @@ class VectorSearch:
             cursor.execute(query, lids)
             duplicates = cursor.fetchall()
 
-            print(f"Found {len(duplicates)} duplicate job pairs by exact match.")
+            #print(f"Found {len(duplicates)} duplicate job pairs by exact match.")
             return duplicates
             
         except Exception as e:
@@ -235,7 +223,7 @@ class VectorSearch:
             raise
         finally:
             if conn:
-                conn.close()
+                release_connection(conn)
     
     def filter_jobs_by_location(self, lids: list[str]) -> List[str]:
         """
@@ -244,7 +232,7 @@ class VectorSearch:
         """
         conn = None
         try:
-            conn = connect_to_db()
+            conn = get_connection()
             cursor = conn.cursor()
             
             placeholders = ','.join(["%s"] * len(lids))
@@ -257,14 +245,14 @@ class VectorSearch:
                     j1.finalzipcode = j2.finalzipcode)
                     OR
                     (j2.finalcity IS NULL OR
-                     j2.finastate IS NULL OR
-                     j2.finalzipcode IS NULL)
+                        j2.finalstate IS NULL OR
+                        j2.finalzipcode IS NULL)
                 WHERE j1.lid IN ({placeholders})
             """
 
             cursor.execute(query, lids)
             job_ids = [row[0] for row in cursor.fetchall()]
-            print(f"Found {len(job_ids)} jobs after location filtering.")
+            #print(f"Found {len(job_ids)} jobs after location filtering.")
             return job_ids
             
         except Exception as e:
@@ -272,15 +260,96 @@ class VectorSearch:
             raise
         finally:
             if conn:
-                conn.close()
+                release_connection(conn)
     
-    def find_duplicates_by_similarity(self, lids: List[str], threshold: float = 0.7) -> List[Tuple[str, str, float]]:
+    def filter_jobs_by_location_and_company(self, lids: list[str]) -> List[str]:
+        """
+        Find jobs by location to further process for duplicates. 
+        Note: Using standardized companyname's could have edge case misses
+        """
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            placeholders = ','.join(["%s"] * len(lids))
+            query = f"""
+                SELECT j2.lid
+                FROM jobs_processed j2
+                JOIN jobs_processed j1
+                ON ((j1.finalcity = j2.finalcity AND
+                    j1.finalstate = j2.finalstate OR
+                    j1.finalzipcode = j2.finalzipcode)
+                    OR
+                    (j2.finalcity IS NULL OR
+                        j2.finalstate IS NULL OR
+                        j2.finalzipcode IS NULL))
+                    AND
+                    j1.companyname_standardized = j2.companyname_standardized
+                WHERE j1.lid IN ({placeholders})
+            """
+
+            cursor.execute(query, lids)
+            job_ids = [row[0] for row in cursor.fetchall()]
+            #print(f"Found {len(job_ids)} jobs after location filtering.")
+            return job_ids
+            
+        except Exception as e:
+            print(f"Error filtering jobs by location: {e}")
+            raise
+        finally:
+            if conn:
+                release_connection(conn)
+    
+    def filter_jobs_by_nlp_attributes(self, lids: list[str]) -> List[str]:
+        """
+        Find jobs with similar NLP attributes to further process for duplicates.
+        This filters based on skills, soft skills, degree level, employment type and seniority.
+        At least one match filtering, need to experiment with strict filtering
+        """
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            placeholders = ','.join(["%s"] * len(lids))
+            query = f"""
+                SELECT j2.lid
+                FROM jobs_processed j2
+                JOIN jobs_processed j1
+                ON (
+                    j1.nlpskills && j2.nlpskills
+                    AND
+                    j1.nlpsoftskills && j2.nlpsoftskills
+                    AND
+                    j1.nlpdegreelevel && j2.nlpdegreelevel
+                    AND
+                    j1.nlpemployment = j2.nlpemployment
+                    AND
+                    j1.nlpseniority = j2.nlpseniority
+                )
+                WHERE j1.lid IN ({placeholders})
+            """
+
+            cursor.execute(query, lids)
+            job_ids = [row[0] for row in cursor.fetchall()]
+            #print(f"Found {len(job_ids)} jobs after NLP attributes filtering.")
+            return job_ids
+            
+        except Exception as e:
+            print(f"Error filtering jobs by NLP attributes: {e}")
+            raise
+        finally:
+            if conn:
+                release_connection(conn)
+
+    def find_duplicates_for_batch(self, lids: List[str], threshold: float = 0.824) -> List[Tuple[str, str, float]]:
         """
          Find duplicate jobs by embedding similarity among a list of job IDs.
         """
         conn = None
         try:
-            conn = connect_to_db()
+            conn = get_connection()
             cursor = conn.cursor()
             
             # Create a temporary table with the job IDs to process
@@ -299,10 +368,10 @@ class VectorSearch:
                 JOIN job_embeddings e2 ON e2.lid IN (SELECT lid FROM temp_job_ids)
                 WHERE e1.lid <> e2.lid
                 AND 1 - (e1.embedding <=> e2.embedding) >= %s
-            """)
+            """, (threshold,))
 
             duplicates = cursor.fetchall()
-            print(f"Found {len(duplicates)} duplicate job pairs by similarity search.")
+            #print(f"Found {len(duplicates)} duplicate job pairs by similarity search.")
             return duplicates
 
         
@@ -311,4 +380,43 @@ class VectorSearch:
             raise
         finally:
             if conn:
-                conn.close()
+                release_connection(conn)
+    
+    def find_duplicates_for_job(self, lid: str, potentials: List[str], threshold: float = 0.824) -> List[Tuple[str, str, float]]:
+        """
+         Find duplicate jobs by embedding similarity among a list of potentials for a specific lid
+        """
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+
+            query = """
+            WITH original_embedding AS (
+                SELECT embedding FROM job_embeddings WHERE lid = %s
+            )
+            SELECT 
+                %s AS original_lid,
+                e.lid AS duplicate_lid, 
+                1 - (e.embedding <=> (SELECT embedding FROM original_embedding)) AS similarity
+            FROM job_embeddings e
+            WHERE e.lid = ANY(%s)
+            AND e.lid <> %s
+            AND 1 - (e.embedding <=> (SELECT embedding FROM original_embedding)) >= %s
+            ORDER BY similarity DESC
+            """
+            
+            cursor.execute(query, (lid, lid, potentials, lid, threshold))
+            duplicates = cursor.fetchall()
+            
+            #print(f"Found {len(duplicates)} duplicate jobs for {lid} with similarity >= {threshold}")
+            return duplicates
+
+        
+        except Exception as e:
+            print(f"Error filtering jobs by location: {e}")
+            raise
+        finally:
+            if conn:
+                release_connection(conn)

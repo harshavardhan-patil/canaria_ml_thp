@@ -108,10 +108,10 @@ def extract_clean_jobs_data():
         nlpskills, nlpsoftskills, nlpdegreelevel, nlpemployment, nlpseniority, correctdate = job
         
         # Clean and normalize job description
-        jobdesc_clean = normalize_text(clean_html(jobdescraw))
+        jobdesc_clean = clean_html(jobdescraw)
         
         # Lemmatize job description
-        jobdesc_lemmatized = lemmatize_text(jobdesc_clean)
+        jobdesc_lemmatized = lemmatize_text(normalize_text(jobdesc_clean))
         
         # Standardize entities
         jobtitle_normalized = normalize_text(jobtitle)
