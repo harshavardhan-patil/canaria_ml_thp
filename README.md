@@ -7,7 +7,8 @@ This project implements a system to identify duplicate job postings using natura
 - [Technical Implementation](#technical-implementation)
   - [Embedding Generation](#embedding-generation)
   - [Vector Search Implementation](#vector-search-implementation)
-- [Evaluation Methodology](#evaluation-methodology)
+- [Threshold Selection](#threshold-selection)
+- [Evaluation](#evaluation)
 - [Environment Setup](#environment-setup)
 - [Running the Project](#running-the-project)
 - [Project Structure](#project-structure)
@@ -100,6 +101,12 @@ The vector search implementation uses a hierarchical approach:
 4. **Weighted Score**:
    - Final similarity score combines title similarity (70% weight) and description similarity (30% weight)
    - Threshold calibrated through evaluation (0.95)
+
+## Threshold Selection
+Initial threshold of 0.824 was selected based on distribution analysis of 49995000 pairs (10% of dataset). We can see the bimodal nature of the distribution, with highly similar (and potentially duplicate jobs on the far right with everything else on the left.
+By analyzing the results of iterative improvements to the search approach, my final optimal threshold was 0.95
+
+<img src='figures/similarity_distribution.png' alt='sd'/>
 
 ## Evaluation
 
