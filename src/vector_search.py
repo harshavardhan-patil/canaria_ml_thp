@@ -117,6 +117,61 @@ class VectorSearch:
             if conn:
                 release_connection(conn)
 
+
+    def add_title_batch(self, title_embeddings: list[str, str]) -> bool:
+        """
+        Add a batch of title embeddings to the database.
+        """
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            execute_values(
+            cursor,
+            """INSERT INTO title_embeddings 
+            (lid, embedding) VALUES %s 
+            ON CONFLICT (lid) DO UPDATE SET embedding = EXCLUDED.embedding""",
+            [(lid, embedding.tolist()) for lid, embedding in title_embeddings],
+            template="(%s, %s::vector)"
+            )
+
+            conn.commit()
+            print(f"Added {len(title_embeddings)} title embeddings to database.")
+
+            return True
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            print(f"Error adding batch of title embeddings: {e}")
+            raise
+        finally:
+            if conn:
+                release_connection(conn)
+
+    def create_title_index(self):
+        """
+        Create IVFFLAT index for title embeddings.
+        """
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+            CREATE INDEX IF NOT EXISTS title_embeddings_idx ON title_embeddings 
+            USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)
+            """)
+
+            conn.commit()
+            print(f"Generated IVFFLAT index for title embeddings")
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            print(f"Error creating index for title embeddings: {e}")
+            raise
+        finally:
+            if conn:
+                release_connection(conn)
+
     def search(self, query_embedding: np.ndarray, k: int = 10, threshold: float = 0.8) -> List[Dict]:
         """
         Search for similar job embeddings.
@@ -301,23 +356,25 @@ class VectorSearch:
             if conn:
                 release_connection(conn)
     
-    def filter_jobs_by_nlp_attributes(self, lids: list[str]) -> List[str]:
+    def filter_jobs_by_nlp_attributes(self, lid: str, potentials: list[str]) -> List[str]:
         """
-        Find jobs with similar NLP attributes to further process for duplicates.
+        Find jobs with similar NLP attributes to the target job among the potential matches.
         This filters based on skills, soft skills, degree level, employment type and seniority.
-        At least one match filtering, need to experiment with strict filtering
+        Currently any-one matching, could experiment with strict matching
         """
         conn = None
         try:
             conn = get_connection()
             cursor = conn.cursor()
             
-            placeholders = ','.join(["%s"] * len(lids))
+            if not potentials:
+                return []
+                
+            placeholders = ','.join(["%s"] * len(potentials))
             query = f"""
                 SELECT j2.lid
                 FROM jobs_processed j2
-                JOIN jobs_processed j1
-                ON (
+                JOIN jobs_processed j1 ON (
                     j1.nlpskills && j2.nlpskills
                     AND
                     j1.nlpsoftskills && j2.nlpsoftskills
@@ -328,12 +385,15 @@ class VectorSearch:
                     AND
                     j1.nlpseniority = j2.nlpseniority
                 )
-                WHERE j1.lid IN ({placeholders})
+                WHERE j1.lid = %s 
+                AND j2.lid IN ({placeholders})
+                AND j1.lid <> j2.lid
             """
 
-            cursor.execute(query, lids)
+            # First parameter is the target lid, followed by the list of potentials
+            cursor.execute(query, [lid] + potentials)
             job_ids = [row[0] for row in cursor.fetchall()]
-            #print(f"Found {len(job_ids)} jobs after NLP attributes filtering.")
+            
             return job_ids
             
         except Exception as e:
@@ -420,3 +480,114 @@ class VectorSearch:
         finally:
             if conn:
                 release_connection(conn)
+    
+    def search_by_title(self, lid: str, potentials: List[str] = None, threshold: float = 0.9, k: int = 100) -> List[Dict]:
+        """
+        Search for jobs with similar titles to the given job, optionally within a set of potential matches.
+        """
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            # First get the embedding for the job title
+            cursor.execute("""
+                SELECT embedding 
+                FROM title_embeddings
+                WHERE lid = %s
+            """, (lid,))
+            
+            result = cursor.fetchone()
+            if not result:
+                print(f"No title embedding found for job {lid}")
+                return []
+            
+            title_embedding = result[0]
+            
+            # Search for similar title embeddings
+            if potentials and len(potentials) > 0:
+                # If potentials provided, only search within those
+                placeholders = ','.join(['%s'] * len(potentials))
+                query = f"""
+                    SELECT 
+                        lid, 
+                        1 - (embedding <=> %s::vector) as similarity
+                    FROM title_embeddings
+                    WHERE lid IN ({placeholders})
+                    AND 1 - (embedding <=> %s::vector) >= %s
+                    AND lid != %s
+                    ORDER BY similarity DESC
+                    LIMIT %s
+                """
+                
+                # Parameters: title_embedding, potential job IDs, title_embedding, threshold, lid, k
+                cursor.execute(query, [title_embedding] + potentials + [title_embedding, threshold, lid, k])
+            else:
+                # If no potentials provided, search all jobs
+                cursor.execute("""
+                    SELECT 
+                        lid, 
+                        1 - (embedding <=> %s::vector) as similarity
+                    FROM title_embeddings
+                    WHERE 1 - (embedding <=> %s::vector) >= %s
+                    AND lid != %s
+                    ORDER BY similarity DESC
+                    LIMIT %s
+                """, (title_embedding, title_embedding, threshold, lid, k))
+            
+            results = [{'lid': row[0], 'similarity': float(row[1])} for row in cursor.fetchall()]
+            return results
+            
+        except Exception as e:
+            print(f"Error searching for similar titles: {e}")
+            raise
+        finally:
+            if conn:
+                release_connection(conn)
+
+    def find_duplicates_for_job_hierarchial(
+        self, 
+        lid: str, 
+        potentials: list[str],
+        title_threshold: float = 0.96,
+        desc_threshold: float = 0.93, 
+        final_threshold: float = 0.95, # 0.824/0.9 Optimal ~ 0.95
+        title_weight: float = 0.7, # todo - experiment with different weighting
+        desc_weight: float = 0.3
+    ) -> List[Tuple[str, str, float]]:
+        """
+        Find duplicates using a two-step approach:
+        1. First filter by title similarity
+        2. Then check full description similarity for candidates
+        3. Calculate weighted score between title and description similarity
+        """
+        # Step 1: Find candidates with similar titles
+        title_candidates = self.search_by_title(lid, potentials, threshold=title_threshold)
+        
+        if not title_candidates:
+            return []
+        
+        candidate_lids = [candidate['lid'] for candidate in title_candidates]
+        title_similarities = {candidate['lid']: candidate['similarity'] for candidate in title_candidates}
+        
+        # Step 2: Find description similarity for candidates
+        duplicates = []
+        
+        desc_results = self.find_duplicates_for_job(lid, candidate_lids, threshold=desc_threshold)
+
+        # Step 3: Calculate weighted scores and filter by final threshold
+        for result in desc_results:
+            original_lid, candidate_lid, desc_similarity = result
+            
+            # Get title similarity from our lookup
+            if candidate_lid in title_similarities:
+                title_similarity = title_similarities[candidate_lid]
+                
+                # Calculate weighted score
+                weighted_score = (title_weight * title_similarity) + (desc_weight * desc_similarity)
+                
+                if weighted_score >= final_threshold:
+                    duplicates.append((lid, candidate_lid, weighted_score))
+        
+        return duplicates
+            
