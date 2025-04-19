@@ -37,7 +37,7 @@ The dataset (`jobs.csv`) contains job postings with the following key attributes
    - The sharp drop between 60-70 suggests 60 is too permissive, capturing many false positives
 
 3. **Company-Specific Patterns**:
-   - DoorDash seems to use highly templated job descriptions across locations
+   - Certain companies like DoorDash seem to use highly templated job descriptions across locations, this would make it harder for separating true duplicates from false positives
    - This suggests building company-specific similarity models might be valuable. Not sure if time will permit this.
 
 4. **Title vs. Description Complementarity**:
